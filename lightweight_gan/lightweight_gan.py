@@ -1189,6 +1189,7 @@ class Trainer():
 
         G = self.GAN.G
         D = self.GAN.D
+        D_aug = self.GAN.D_aug
 
         apply_gradient_penalty = self.steps % 4 == 0
 
@@ -1215,9 +1216,9 @@ class Trainer():
                 if apply_gradient_penalty:
                     image_batch.requires_grad_()
 
-                generated_images, (fake_output, fake_output_32x32, _) = D(generated_images, detach = True, input_requires_grad = apply_gradient_penalty, return_discr_input = True, **aug_kwargs)
-
-                real_output, real_output_32x32, real_aux_loss = D(image_batch,  calc_aux_loss = True, **aug_kwargs)
+                # Use D_aug for augmented forward pass
+                discr_input, (fake_output, fake_output_32x32, _) = D_aug(generated_images, prob=aug_prob, types=aug_types, detach=True, input_requires_grad=apply_gradient_penalty, return_discr_input=True)
+                real_output, real_output_32x32, real_aux_loss = D_aug(image_batch, prob=aug_prob, types=aug_types, calc_aux_loss=True)
 
                 real_output_loss = real_output
                 fake_output_loss = fake_output
@@ -1240,7 +1241,7 @@ class Trainer():
                                        grad_outputs=[torch.ones_like(t) for t in real_outputs],
                                        create_graph=True, retain_graph=True, only_inputs=True)[0]
 
-                scaled_fake_gradients = torch_grad(outputs=fake_outputs, inputs=generated_images,
+                scaled_fake_gradients = torch_grad(outputs=fake_outputs, inputs=discr_input,
                                        grad_outputs=[torch.ones_like(t) for t in fake_outputs],
                                        create_graph=True, retain_graph=True, only_inputs=True)[0]
 
@@ -1295,8 +1296,8 @@ class Trainer():
             with amp_context():
                 generated_images = G(latents)
 
-                fake_output, fake_output_32x32, _ = D(generated_images, **aug_kwargs)
-                real_output, real_output_32x32, _ = D(image_batch, **aug_kwargs) if G_requires_calc_real else (None, None, None)
+                fake_output, fake_output_32x32, _ = D_aug(generated_images, prob=aug_prob, types=aug_types)
+                real_output, real_output_32x32, _ = D_aug(image_batch, prob=aug_prob, types=aug_types) if G_requires_calc_real else (None, None, None)
 
                 loss = G_loss_fn(fake_output, real_output)
                 loss_32x32 = G_loss_fn(fake_output_32x32, real_output_32x32)
