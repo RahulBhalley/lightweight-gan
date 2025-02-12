@@ -11,7 +11,7 @@ from lightweight_gan.diff_augment_test import DiffAugmentTest
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
-
+from accelerate import Accelerator
 import numpy as np
 
 def exists(val):
@@ -36,21 +36,20 @@ def set_seed(seed):
     random.seed(seed)
 
 def run_training(rank, world_size, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash):
-    is_main = rank == 0
-    is_ddp = world_size > 1
+    accelerator = Accelerator()
+    device = accelerator.device
+    
+    is_main = accelerator.is_main_process
+    is_ddp = accelerator.num_processes > 1
 
     if is_ddp:
         set_seed(seed)
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
-        dist.init_process_group('nccl', rank=rank, world_size=world_size)
-
-        print(f"{rank + 1}/{world_size} process initialized.")
 
     model_args.update(
         is_ddp = is_ddp,
-        rank = rank,
-        world_size = world_size
+        rank = accelerator.process_index,
+        world_size = accelerator.num_processes,
+        device = device
     )
 
     model = Trainer(**model_args, hparams=model_args, use_aim=use_aim, aim_repo=aim_repo, aim_run_hash=aim_run_hash)
@@ -61,8 +60,16 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
         model.clear()
 
     model.set_data_src(data)
+    
+    # Prepare model and optimizers with accelerator
+    model.GAN.G, model.GAN.D, model.GAN.D_aug = accelerator.prepare(
+        model.GAN.G, model.GAN.D, model.GAN.D_aug
+    )
+    model.GAN.G_opt, model.GAN.D_opt = accelerator.prepare(
+        model.GAN.G_opt, model.GAN.D_opt
+    )
 
-    progress_bar = tqdm(initial = model.steps, total = num_train_steps, mininterval=10., desc=f'{name}<{data}>')
+    progress_bar = tqdm(initial = model.steps, total = num_train_steps, mininterval=10., desc=f'{name}<{data}>', disable=not is_main)
     while model.steps < num_train_steps:
         retry_call(model.train, tries=3, exceptions=NanException)
         progress_bar.n = model.steps
@@ -71,9 +78,6 @@ def run_training(rank, world_size, model_args, data, load_from, new, num_train_s
             model.print_log()
 
     model.save(model.checkpoint_num)
-
-    if is_ddp:
-        dist.destroy_process_group()
 
 def train_from_folder(
     data = './data',
@@ -182,16 +186,8 @@ def train_from_folder(
         DiffAugmentTest(data=data, image_size=image_size, batch_size=batch_size, types=aug_types, nrow=num_image_tiles, device=device)
         return
 
-    world_size = torch.cuda.device_count() if multi_gpus and torch.cuda.is_available() else 1
-
-    if world_size == 1 or not multi_gpus:
-        run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash)
-        return
-
-    mp.spawn(run_training,
-        args=(world_size, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash,),
-        nprocs=world_size,
-        join=True)
+    # Run training directly with accelerator handling distributed setup
+    run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash)
 
 def main():
     fire.Fire(train_from_folder)
