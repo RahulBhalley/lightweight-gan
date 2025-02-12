@@ -927,7 +927,6 @@ class LightweightGAN(nn.Module):
             fmap_inverse_coef = fmap_inverse_coef,
             transparent = transparent,
             greyscale = greyscale,
-            attn_res_layers = attn_res_layers,
             disc_output_size = disc_output_size
         )
 
@@ -1649,3 +1648,32 @@ class Trainer():
             return None
 
         return saved_nums
+
+    def write_config(self):
+        self.config_path.write_text(json.dumps(self.config()))
+
+    def load_config(self):
+        config = self.config() if not self.config_path.exists() else json.loads(self.config_path.read_text())
+        self.image_size = config['image_size']
+        self.transparent = config['transparent']
+        self.syncbatchnorm = config['syncbatchnorm']
+        self.disc_output_size = config['disc_output_size']
+        self.greyscale = config.pop('greyscale', False)
+        self.attn_res_layers = config.pop('attn_res_layers', [])
+        self.freq_chan_attn = config.pop('freq_chan_attn', False)
+        self.optimizer = config.pop('optimizer', 'adam')
+        self.fmap_max = config.pop('fmap_max', 512)
+        del self.GAN
+        self.init_GAN()
+
+    def config(self):
+        return {
+            'image_size': self.image_size,
+            'transparent': self.transparent,
+            'greyscale': self.greyscale,
+            'syncbatchnorm': self.syncbatchnorm,
+            'disc_output_size': self.disc_output_size,
+            'optimizer': self.optimizer,
+            'attn_res_layers': self.attn_res_layers,
+            'freq_chan_attn': self.freq_chan_attn
+        }
