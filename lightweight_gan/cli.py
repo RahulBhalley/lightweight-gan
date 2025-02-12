@@ -119,7 +119,8 @@ def train_from_folder(
     use_aim = False,
     aim_repo = None,
     aim_run_hash = None,
-    load_strict = True
+    load_strict = True,
+    device = None
 ):
     num_image_tiles = default(num_image_tiles, 4 if image_size > 512 else 8)
 
@@ -151,7 +152,8 @@ def train_from_folder(
         calculate_fid_num_images = calculate_fid_num_images,
         clear_fid_cache = clear_fid_cache,
         amp = amp,
-        load_strict = load_strict
+        load_strict = load_strict,
+        device = device
     )
 
     if generate:
@@ -177,10 +179,10 @@ def train_from_folder(
         return
 
     if aug_test:
-        DiffAugmentTest(data=data, image_size=image_size, batch_size=batch_size, types=aug_types, nrow=num_image_tiles)
+        DiffAugmentTest(data=data, image_size=image_size, batch_size=batch_size, types=aug_types, nrow=num_image_tiles, device=device)
         return
 
-    world_size = torch.cuda.device_count()
+    world_size = torch.cuda.device_count() if multi_gpus and torch.cuda.is_available() else 1
 
     if world_size == 1 or not multi_gpus:
         run_training(0, 1, model_args, data, load_from, new, num_train_steps, name, seed, use_aim, aim_repo, aim_run_hash)

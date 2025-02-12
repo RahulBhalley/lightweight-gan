@@ -33,9 +33,22 @@ from einops.layers.torch import Rearrange
 
 from adabelief_pytorch import AdaBelief
 
-# asserts
+# asserts and device setup
+def get_default_device():
+    if torch.cuda.is_available():
+        return 'cuda'
+    elif torch.backends.mps.is_available():
+        return 'mps'
+    return 'cpu'
 
-assert torch.cuda.is_available(), 'You need to have an Nvidia GPU with CUDA installed.'
+def get_device_type(device):
+    if isinstance(device, torch.device):
+        device = device.type
+    if 'cuda' in str(device):
+        return 'cuda'
+    elif 'mps' in str(device):
+        return 'mps'
+    return 'cpu'
 
 # constants
 
@@ -887,11 +900,13 @@ class LightweightGAN(nn.Module):
         ttur_mult = 1.,
         lr = 2e-4,
         rank = 0,
-        ddp = False
+        ddp = False,
+        device = None
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.image_size = image_size
+        self.device = default(device, get_default_device())
 
         G_kwargs = dict(
             image_size = image_size,
@@ -933,7 +948,7 @@ class LightweightGAN(nn.Module):
         self.apply(self._init_weights)
         self.reset_parameter_averaging()
 
-        self.cuda(rank)
+        self.to(self.device)
         self.D_aug = AugWrapper(self.D, image_size)
 
     def _init_weights(self, m):
@@ -1004,11 +1019,14 @@ class Trainer():
         aim_repo = None,
         aim_run_hash = None,
         load_strict = True,
+        device = None,
         *args,
         **kwargs
     ):
         self.GAN_params = [args, kwargs]
         self.GAN = None
+        self.device = default(device, get_default_device())
+        self.device_type = get_device_type(self.device)
 
         self.name = name
 
@@ -1083,7 +1101,8 @@ class Trainer():
 
         self.load_strict = load_strict
 
-        self.amp = amp
+        # Only enable AMP for CUDA devices
+        self.amp = amp and self.device_type == 'cuda'
         self.G_scaler = GradScaler(enabled = self.amp)
         self.D_scaler = GradScaler(enabled = self.amp)
 
@@ -1143,6 +1162,7 @@ class Trainer():
             transparent = self.transparent,
             greyscale = self.greyscale,
             rank = self.rank,
+            device = self.device,
             *args,
             **kwargs
         )
@@ -1198,14 +1218,13 @@ class Trainer():
 
     def train(self):
         assert exists(self.loader), 'You must first initialize the data source with `.set_data_src(<folder of images>)`'
-        device = torch.device(f'cuda:{self.rank}')
 
         if not exists(self.GAN):
             self.init_GAN()
 
         self.GAN.train()
-        total_disc_loss = torch.zeros([], device=device)
-        total_gen_loss = torch.zeros([], device=device)
+        total_disc_loss = torch.zeros([], device=self.device)
+        total_gen_loss = torch.zeros([], device=self.device)
 
         batch_size = math.ceil(self.batch_size / self.world_size)
 
@@ -1223,11 +1242,9 @@ class Trainer():
         apply_gradient_penalty = self.steps % 4 == 0
 
         # amp related contexts and functions
-
-        amp_context = partial(autocast, 'cuda') if self.amp else null_context
+        amp_context = partial(autocast, self.device_type) if self.amp else null_context
 
         # discriminator loss fn
-
         if self.dual_contrast_loss:
             D_loss_fn = dual_contrastive_loss
         else:
@@ -1237,8 +1254,8 @@ class Trainer():
 
         self.GAN.D_opt.zero_grad()
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[D_aug, G]):
-            latents = torch.randn(batch_size, latent_dim).cuda(self.rank)
-            image_batch = next(self.loader).cuda(self.rank)
+            latents = torch.randn(batch_size, latent_dim).to(self.device)
+            image_batch = next(self.loader).to(self.device)
 
             with amp_context():
                 with torch.no_grad():
@@ -1318,10 +1335,10 @@ class Trainer():
         self.GAN.G_opt.zero_grad()
 
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[G, D_aug]):
-            latents = torch.randn(batch_size, latent_dim).cuda(self.rank)
+            latents = torch.randn(batch_size, latent_dim).to(self.device)
 
             if G_requires_calc_real:
-                image_batch = next(self.loader).cuda(self.rank)
+                image_batch = next(self.loader).to(self.device)
                 image_batch.requires_grad_()
 
             with amp_context():
